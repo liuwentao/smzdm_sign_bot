@@ -18,6 +18,21 @@ import hashlib
 import base64
 import urllib.parse
 
+import re
+import threading
+# 原先的 print 函数和主线程的锁
+_print = print
+mutex = threading.Lock()
+
+
+# 定义新的 print 函数
+def print(text, *args, **kw):
+    """
+    使输出有序进行，不出现多线程同一时间输出导致错乱的问题。
+    """
+    with mutex:
+        _print(text, *args, **kw)
+
 """
 http headers
 """
@@ -40,139 +55,102 @@ SIGN_URL = 'https://zhiyou.smzdm.com/user/checkin/jsonp_checkin'
 # 环境变量中用于存放cookie的key值
 KEY_OF_COOKIE = "SMZDM_COOKIE"
 
-TG_TOKEN = ''
-TG_USER_ID = ''
-# serverJ
-SCKEY = ''
-# push+
-PUSH_PLUS_TOKEN = ''
-# 钉钉机器人
-DD_BOT_TOKEN = ''
-DD_BOT_SECRET = ''
+# 通知服务
+# fmt: off
+push_config = {
+    'HITOKOTO': False,                  # 启用一言（随机句子）
 
-if "TG_BOT_TOKEN" in os.environ and len(os.environ["TG_BOT_TOKEN"]) > 1 and "TG_USER_ID" in os.environ and len(
-        os.environ["TG_USER_ID"]) > 1:
-    TG_TOKEN = os.environ["TG_BOT_TOKEN"]
-    TG_USER_ID = os.environ["TG_USER_ID"]
+    'BARK_PUSH': '',                    # bark IP 或设备码，例：https://api.day.app/DxHcxxxxxRxxxxxxcm/
+    'BARK_ARCHIVE': '',                 # bark 推送是否存档
+    'BARK_GROUP': '',                   # bark 推送分组
+    'BARK_SOUND': '',                   # bark 推送声音
 
-if "PUSH_KEY" in os.environ and len(os.environ["PUSH_KEY"]) > 1:
-    SCKEY = os.environ["PUSH_KEY"]
+    'CONSOLE': True,                    # 控制台输出
 
-if "DD_BOT_TOKEN" in os.environ and len(os.environ["DD_BOT_TOKEN"]) > 1 and "DD_BOT_SECRET" in os.environ and len(
-        os.environ["DD_BOT_SECRET"]) > 1:
-    DD_BOT_TOKEN = os.environ["DD_BOT_TOKEN"]
-    DD_BOT_SECRET = os.environ["DD_BOT_SECRET"]
+    'DD_BOT_SECRET': '',                # 钉钉机器人的 DD_BOT_SECRET
+    'DD_BOT_TOKEN': '',                 # 钉钉机器人的 DD_BOT_TOKEN
 
-if "PUSH_PLUS_TOKEN" in os.environ and len(os.environ["PUSH_PLUS_TOKEN"]) > 1:
-    PUSH_PLUS_TOKEN = os.environ["PUSH_PLUS_TOKEN"]
+    'FSKEY': '',                        # 飞书机器人的 FSKEY
+
+    'GOBOT_URL': '',                    # go-cqhttp
+                                        # 推送到个人QQ：http://127.0.0.1/send_private_msg
+                                        # 群：http://127.0.0.1/send_group_msg
+    'GOBOT_QQ': '',                     # go-cqhttp 的推送群或用户
+                                        # GOBOT_URL 设置 /send_private_msg 时填入 user_id=个人QQ
+                                        #               /send_group_msg   时填入 group_id=QQ群
+    'GOBOT_TOKEN': '',                  # go-cqhttp 的 access_token
+
+    'GOTIFY_URL': '',                   # gotify地址,如https://push.example.de:8080
+    'GOTIFY_TOKEN': '',                 # gotify的消息应用token
+    'GOTIFY_PRIORITY': 0,               # 推送消息优先级,默认为0
+
+    'IGOT_PUSH_KEY': '',                # iGot 聚合推送的 IGOT_PUSH_KEY
+
+    'PUSH_KEY': '',                     # server 酱的 PUSH_KEY，兼容旧版与 Turbo 版
+
+    'PUSH_PLUS_TOKEN': '',              # push+ 微信推送的用户令牌
+    'PUSH_PLUS_USER': '',               # push+ 微信推送的群组编码
+
+    'QMSG_KEY': '',                     # qmsg 酱的 QMSG_KEY
+    'QMSG_TYPE': '',                    # qmsg 酱的 QMSG_TYPE
+
+    'QYWX_AM': '',                      # 企业微信应用
+
+    'QYWX_KEY': '',                     # 企业微信机器人
+
+    'TG_BOT_TOKEN': '',                 # tg 机器人的 TG_BOT_TOKEN，例：1407203283:AAG9rt-6RDaaX0HBLZQq0laNOh898iFYaRQ
+    'TG_USER_ID': '',                   # tg 机器人的 TG_USER_ID，例：1434078534
+    'TG_API_HOST': '',                  # tg 代理 api
+    'TG_PROXY_AUTH': '',                # tg 代理认证参数
+    'TG_PROXY_HOST': '',                # tg 机器人的 TG_PROXY_HOST
+    'TG_PROXY_PORT': '',                # tg 机器人的 TG_PROXY_PORT
+}
+notify_function = []
+# fmt: on
+
+# 首先读取 面板变量 或者 github action 运行变量
+for k in push_config:
+    if os.getenv(k):
+        v = os.getenv(k)
+        push_config[k] = v
 
 
-def logout(self):
-    print("[{0}]: {1}".format(datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), self))
-    sys.stdout.flush()
-
-
-def push_via_boot(title, content):
-    dingding_bot(title, content)
-    telegram_bot(title, content)
-    serverJ(title, content)
-    push_plus_bot(title, content)
-
-
-def dingding_bot(title, content):
-    if not DD_BOT_TOKEN or not DD_BOT_SECRET:
-        print("钉钉推送服务的DD_BOT_TOKEN或者DD_BOT_SECRET未设置!!\n取消推送")
+def bark(title: str, content: str) -> None:
+    """
+    使用 bark 推送消息。
+    """
+    if not push_config.get("BARK_PUSH"):
+        print("bark 服务的 BARK_PUSH 未设置!!\n取消推送")
         return
-    timestamp = str(round(time.time() * 1000))  # 时间戳
-    secret_enc = DD_BOT_SECRET.encode('utf-8')
-    string_to_sign = '{}\n{}'.format(timestamp, DD_BOT_SECRET)
-    string_to_sign_enc = string_to_sign.encode('utf-8')
-    hmac_code = hmac.new(secret_enc, string_to_sign_enc, digestmod=hashlib.sha256).digest()
-    sign = urllib.parse.quote_plus(base64.b64encode(hmac_code))  # 签名
-    print('开始使用 钉钉机器人 推送消息...', end='')
-    url = f'https://oapi.dingtalk.com/robot/send?access_token={DD_BOT_TOKEN}&timestamp={timestamp}&sign={sign}'
-    headers = {'Content-Type': 'application/json;charset=utf-8'}
-    data = {
-        'msgtype': 'text',
-        'text': {'content': f'{title}\n\n{content}'}
-    }
-    response = requests.post(url=url, data=json.dumps(data), headers=headers, timeout=15).json()
-    if not response['errcode']:
-        print('推送成功！')
+    print("bark 服务启动")
+
+    if push_config.get("BARK_PUSH").startswith("http"):
+        url = f'{push_config.get("BARK_PUSH")}/{urllib.parse.quote_plus(title)}/{urllib.parse.quote_plus(content)}'
     else:
-        print('推送失败！')
+        url = f'https://api.day.app/{push_config.get("BARK_PUSH")}/{urllib.parse.quote_plus(title)}/{urllib.parse.quote_plus(content)}'
 
+    bark_params = {
+        "BARK_ARCHIVE": "isArchive",
+        "BARK_GROUP": "group",
+        "BARK_SOUND": "sound",
+    }
+    params = ""
+    for pair in filter(
+        lambda pairs: pairs[0].startswith("BARK_")
+        and pairs[0] != "BARK_PUSH"
+        and pairs[1]
+        and bark_params.get(pairs[0]),
+        push_config.items(),
+    ):
+        params += f"{bark_params.get(pair[0])}={pair[1]}&"
+    if params:
+        url = url + "?" + params.rstrip("&")
+    response = requests.get(url).json()
 
-def telegram_bot(title, content):
-    try:
-        print("\n")
-        bot_token = TG_TOKEN
-        user_id = TG_USER_ID
-        if not bot_token or not user_id:
-            print("tg服务的bot_token或者user_id未设置!!\n取消推送")
-            return
-        print("tg服务启动")
-        url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
-
-        headers = {'Content-Type': 'application/x-www-form-urlencoded'}
-        payload = {'chat_id': str(TG_USER_ID), 'text': f'{title}\n\n{content}', 'disable_web_page_preview': 'true'}
-        proxies = None
-
-        try:
-            response = requests.post(url=url, headers=headers, params=payload, proxies=proxies).json()
-        except:
-            print('推送失败！')
-        if response['ok']:
-            print('推送成功！')
-        else:
-            print('推送失败！')
-    except Exception as e:
-        print(e)
-
-
-# push推送
-def push_plus_bot(title, content):
-    try:
-        print("\n")
-        if not PUSH_PLUS_TOKEN:
-            print("PUSHPLUS服务的token未设置!!\n取消推送")
-            return
-        print("PUSHPLUS服务启动")
-        url = 'http://pushplus.hxtrip.com/send'
-        data = {
-            "token": PUSH_PLUS_TOKEN,
-            "title": title,
-            "content": content
-        }
-        body = json.dumps(data).encode(encoding='utf-8')
-        headers = {'Content-Type': 'application/json'}
-        response = requests.post(url=url, data=body, headers=headers).json()
-        if response['code'] == 200:
-            print('推送成功！')
-        else:
-            print('推送失败！')
-    except Exception as e:
-        print(e)
-
-
-def serverJ(title, content):
-    try:
-        print("\n")
-        if not SCKEY:
-            print("server酱服务的SCKEY未设置!!\n取消推送")
-            return
-        print("serverJ服务启动")
-        data = {
-            "title": title,
-            "desp": content.replace("\n", "\n\n")
-        }
-        response = requests.post("https://sctapi.ftqq.com/{SCKEY}.send", data=data).json()
-        if response['errno'] == 0:
-            print('推送成功！')
-        else:
-            print('推送失败！')
-    except Exception as e:
-        print(e)
+    if response["code"] == 200:
+        print("bark 推送成功！")
+    else:
+        print("bark 推送失败！")
 
 
 class SignBot(object):
@@ -191,7 +169,7 @@ class SignBot(object):
             result = msg.json()
             return True
         except Exception as e:
-            logout(f'Error : {e}')
+            print(f'Error : {e}')
             return False
 
     def load_cookie_str(self, cookies):
@@ -211,16 +189,35 @@ class SignBot(object):
             return msg.json()
         return msg.content
 
+if push_config.get("BARK_PUSH"):
+    print("add bark server")
+    notify_function.append(bark)
+
+
+def send(title: str, content: str) -> None:
+    if not content:
+        print(f"{title} 推送内容为空！")
+        return
+
+    ts = [
+        threading.Thread(target=mode, args=(title, content), name=mode.__name__)
+        for mode in notify_function
+    ]
+    [t.start() for t in ts]
+    [t.join() for t in ts]
 
 if __name__ == '__main__':
     bot = SignBot()
     cookies = os.environ[KEY_OF_COOKIE]
     cookieList = cookies.split("&")
-    logout("检测到{}个cookie记录\n开始签到".format(len(cookieList)))
+    print("检测到{}个cookie记录\n开始签到".format(len(cookieList)))
     index = 0
+    print(push_config.get("BARK_PUSH"))
+    print(f"{cookieList} 推送内容为空！")
     for c in cookieList:
         bot.load_cookie_str(c)
         result = bot.checkin()
+        print(f"{result} 推送内容为空！")
         msg = "\n⭐⭐⭐签到成功{1}天⭐⭐⭐\n🏅🏅🏅金币[{2}]\n🏅🏅🏅积分[{3}]\n🏅🏅🏅经验[{4}],\n🏅🏅🏅等级[{5}]\n🏅🏅补签卡[{6}]".format(
             index,
             result['data']["checkin_num"],
@@ -229,9 +226,9 @@ if __name__ == '__main__':
             result['data']["exp"],
             result['data']["rank"],
             result['data']["cards"])
-        logout(msg)
-        logout("开始推送，暂时支持【Telegram】【钉钉】【push+】【serverJ】")
-        push_via_boot("张大妈自动签到", msg)
-        # telegram_bot("张大妈自动签到", msg)
+        print(msg)
+        print("开始推送")
+        print(f"{msg} 推送内容为空！")
+        send("张大妈自动签到", msg)
         index += 1
-    logout("签到结束")
+    print("签到结束")
